@@ -1,0 +1,1605 @@
+импорт * как HTTP измодуля "std/http"
+импорт * как FileSystem измодуля "std/filesystem"
+импорт * как JSON измодуля "std/json"
+импорт * как Date измодуля "std/date"
+импорт * как Crypto измодуля "std/crypto"
+импорт * как String измодуля "std/string"
+импорт * как Array измодуля "std/array"
+импорт * как DB измодуля "std/database"
+импорт * как Style измодуля "std/style"
+
+# Armazenamento de sessões ativas (simples, em memória)
+пусть sessions = {}
+
+# Conexão com banco de dados (global)
+пусть db = нуль
+
+# Função para inicializar banco de dados
+функция inicializarBanco() {
+    попытаться {
+        # Garantir que o diretório data existe
+        если (!FileSystem.exists("data")) {
+            FileSystem.createDir("data")
+        }
+        
+        # Abrir conexão com banco de dados
+        db = DB.открытьБД("data/site.db")
+        
+        # Criar tabelas se não existirem
+        db.execute("CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL
+        )")
+        
+        db.execute("CREATE TABLE IF NOT EXISTS comments (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            text TEXT NOT NULL,
+            date INTEGER NOT NULL
+        )")
+        
+        db.execute("CREATE TABLE IF NOT EXISTS whatsapp_numbers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            number TEXT NOT NULL,
+            active INTEGER DEFAULT 0,
+            rotation_enabled INTEGER DEFAULT 0,
+            click_limit INTEGER DEFAULT 0,
+            current_clicks INTEGER DEFAULT 0
+        )")
+        
+        # Adicionar novos campos se a tabela já existir (migração)
+        попытаться {
+            db.execute("ALTER TABLE whatsapp_numbers ADD COLUMN rotation_enabled INTEGER DEFAULT 0")
+        } перехватить (e) {
+            # Coluna já existe, ignorar
+        }
+        попытаться {
+            db.execute("ALTER TABLE whatsapp_numbers ADD COLUMN click_limit INTEGER DEFAULT 0")
+        } перехватить (e) {
+            # Coluna já existe, ignorar
+        }
+        попытаться {
+            db.execute("ALTER TABLE whatsapp_numbers ADD COLUMN current_clicks INTEGER DEFAULT 0")
+        } перехватить (e) {
+            # Coluna já existe, ignorar
+        }
+        
+        db.execute("CREATE TABLE IF NOT EXISTS whatsapp_clicks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number_id INTEGER NOT NULL,
+            click_date INTEGER NOT NULL,
+            FOREIGN KEY (number_id) REFERENCES whatsapp_numbers(id)
+        )")
+        
+        печать("✅ Banco de dados inicializado: data/site.db")
+        вернуть истина
+    } перехватить (erro) {
+        печать("❌ Erro ao inicializar banco de dados: " + erro)
+        вернуть ложь
+    }
+}
+
+# Inicializar banco ao iniciar
+inicializarBanco()
+
+# Função para obter usuários do banco de dados
+функция obterUsuarios() {
+    попытаться {
+        если (db == нуль) {
+            печать("⚠️ Banco de dados não inicializado")
+            вернуть []
+        }
+        пусть usuarios = db.query("SELECT * FROM users")
+        вернуть usuarios
+    } перехватить (erro) {
+        печать("Erro ao obter usuários: " + erro)
+        вернуть []
+    }
+}
+
+# Função para verificar credenciais de usuário
+функция verificarUsuario(username, password) {
+    попытаться {
+        если (db == нуль) {
+            печать("⚠️ Banco de dados não inicializado")
+            вернуть ложь
+        }
+        пусть usuarios = db.query("SELECT * FROM users WHERE username = ? AND password = ?", 
+            [username, password])
+        если (Array.длина(usuarios) > 0) {
+            вернуть истина
+        }
+        вернуть ложь
+    } перехватить (erro) {
+        печать("Erro ao verificar usuário: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para obter comentários do banco de dados
+функция obterComentarios() {
+    попытаться {
+        если (db == нуль) {
+            печать("⚠️ Banco de dados não inicializado")
+            вернуть []
+        }
+        пусть comentarios = db.query("SELECT * FROM comments ORDER BY date DESC")
+        вернуть comentarios
+    } перехватить (erro) {
+        печать("Erro ao obter comentários: " + erro)
+        вернуть []
+    }
+}
+
+# Função para adicionar comentário no banco de dados
+функция adicionarComentario(id, name, text, date) {
+    попытаться {
+        если (db == нуль) {
+            печать("⚠️ Banco de dados não inicializado")
+            вернуть ложь
+        }
+        db.execute("INSERT INTO comments (id, name, text, date) VALUES (?, ?, ?, ?)", 
+            [id, name, text, date])
+        вернуть истина
+    } перехватить (erro) {
+        печать("Erro ao adicionar comentário: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para atualizar comentário no banco de dados
+функция atualizarComentario(id, text) {
+    попытаться {
+        если (db == нуль) {
+            печать("⚠️ Banco de dados não inicializado")
+            вернуть ложь
+        }
+        пусть resultado = db.execute("UPDATE comments SET text = ? WHERE id = ?", [text, id])
+        вернуть resultado.changes > 0
+    } перехватить (erro) {
+        печать("Erro ao atualizar comentário: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para deletar comentário do banco de dados
+функция deletarComentario(id) {
+    попытаться {
+        если (db == нуль) {
+            печать("⚠️ Banco de dados não inicializado")
+            вернуть ложь
+        }
+        пусть resultado = db.execute("DELETE FROM comments WHERE id = ?", [id])
+        вернуть resultado.changes > 0
+    } перехватить (erro) {
+        печать("Erro ao deletar comentário: " + erro)
+        вернуть ложь
+    }
+}
+
+# ========== FUNÇÕES WHATSAPP ==========
+
+# Função para obter número ativo do WhatsApp
+функция obterNumeroAtivo() {
+    попытаться {
+        если (db == нуль) {
+            вернуть нуль
+        }
+        пусть numeros = db.query("SELECT * FROM whatsapp_numbers WHERE active = 1 LIMIT 1")
+        если (Array.длина(numeros) > 0) {
+            вернуть numeros[0]
+        }
+        вернуть нуль
+    } перехватить (erro) {
+        печать("Erro ao obter número ativo: " + erro)
+        вернуть нуль
+    }
+}
+
+# Função para obter todos os números do WhatsApp
+функция obterTodosNumeros() {
+    попытаться {
+        если (db == нуль) {
+            вернуть []
+        }
+        пусть numeros = db.query("SELECT * FROM whatsapp_numbers ORDER BY active DESC, name ASC")
+        вернуть numeros
+    } перехватить (erro) {
+        печать("Erro ao obter números: " + erro)
+        вернуть []
+    }
+}
+
+# Função para adicionar número do WhatsApp
+функция adicionarNumero(name, number) {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        db.execute("INSERT INTO whatsapp_numbers (name, number, active) VALUES (?, ?, 0)", 
+            [name, number])
+        вернуть истина
+    } перехватить (erro) {
+        печать("Erro ao adicionar número: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para atualizar número do WhatsApp
+функция atualizarNumero(id, name, number) {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        пусть resultado = db.execute("UPDATE whatsapp_numbers SET name = ?, number = ? WHERE id = ?", 
+            [name, number, id])
+        вернуть resultado.changes > 0
+    } перехватить (erro) {
+        печать("Erro ao atualizar número: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para ativar número (desativa todos os outros automaticamente)
+функция ativarNumero(id) {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        # Desativar todos os números
+        db.execute("UPDATE whatsapp_numbers SET active = 0")
+        # Ativar o número selecionado e zerar contagem
+        пусть resultado = db.execute("UPDATE whatsapp_numbers SET active = 1, current_clicks = 0 WHERE id = ?", [id])
+        вернуть resultado.changes > 0
+    } перехватить (erro) {
+        печать("Erro ao ativar número: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para ativar/desativar rotação automática
+функция definirRotacao(ativado, limite) {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        # Atualizar todos os números com as configurações de rotação
+        db.execute("UPDATE whatsapp_numbers SET rotation_enabled = ?, click_limit = ?", 
+            [ativado ? 1 : 0, limite])
+        вернуть истина
+    } перехватить (erro) {
+        печать("Erro ao definir rotação: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para obter configuração de rotação
+функция obterConfiguracaoRotacao() {
+    попытаться {
+        если (db == нуль) {
+            вернуть { enabled = ложь, limit = 0 }
+        }
+        пусть config = db.query("SELECT rotation_enabled, click_limit FROM whatsapp_numbers LIMIT 1")
+        если (Array.длина(config) > 0) {
+            вернуть { 
+                enabled = config[0].rotation_enabled == 1, 
+                limit = config[0].click_limit 
+            }
+        }
+        вернуть { enabled = ложь, limit = 0 }
+    } перехватить (erro) {
+        печать("Erro ao obter configuração de rotação: " + erro)
+        вернуть { enabled = ложь, limit = 0 }
+    }
+}
+
+# Função para deletar número do WhatsApp
+функция deletarNumero(id) {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        # Deletar cliques associados
+        db.execute("DELETE FROM whatsapp_clicks WHERE number_id = ?", [id])
+        # Deletar número
+        пусть resultado = db.execute("DELETE FROM whatsapp_numbers WHERE id = ?", [id])
+        вернуть resultado.changes > 0
+    } перехватить (erro) {
+        печать("Erro ao deletar número: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para rotacionar para o próximo número
+функция rotacionarProximoNumero() {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        
+        # Obter número ativo atual
+        пусть numeroAtual = obterNumeroAtivo()
+        если (numeroAtual == нуль) {
+            вернуть ложь
+        }
+        
+        # Zerar contagem do número atual
+        db.execute("UPDATE whatsapp_numbers SET current_clicks = 0, active = 0 WHERE id = ?", 
+            [numeroAtual.id])
+        
+        # Obter todos os números ordenados
+        пусть todosNumeros = db.query("SELECT * FROM whatsapp_numbers ORDER BY id ASC")
+        если (Array.длина(todosNumeros) == 0) {
+            вернуть ложь
+        }
+        
+        # Encontrar índice do número atual
+        пусть indiceAtual = -1
+        для (пусть i = 0; i < Array.длина(todosNumeros); i = i + 1) {
+            если (todosNumeros[i].id == numeroAtual.id) {
+                indiceAtual = i
+                прервать
+            }
+        }
+        
+        # Encontrar próximo número (circular)
+        пусть proximoIndice = (indiceAtual + 1) % Array.длина(todosNumeros)
+        пусть proximoNumero = todosNumeros[proximoIndice]
+        
+        # Ativar próximo número
+        db.execute("UPDATE whatsapp_numbers SET active = 1, current_clicks = 0 WHERE id = ?", 
+            [proximoNumero.id])
+        
+        печать("🔄 Rotação: " + numeroAtual.name + " → " + proximoNumero.name)
+        вернуть истина
+    } перехватить (erro) {
+        печать("Erro ao rotacionar número: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para verificar e aplicar rotação se necessário
+функция verificarERotacionar() {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        
+        # Obter número ativo com configurações ATUALIZADAS (após incremento)
+        пусть numeroAtivo = db.query("SELECT * FROM whatsapp_numbers WHERE active = 1 LIMIT 1")
+        если (Array.длина(numeroAtivo) == 0) {
+            вернуть ложь
+        }
+        
+        numeroAtivo = numeroAtivo[0]
+        
+        # Verificar se rotação está ativada globalmente
+        если (numeroAtivo.rotation_enabled != 1) {
+            вернуть ложь
+        }
+        
+        # Verificar se atingiu o limite (após incremento)
+        если (numeroAtivo.click_limit > 0 && numeroAtivo.current_clicks >= numeroAtivo.click_limit) {
+            печать("🔄 Limite atingido! " + numeroAtivo.name + " tem " + numeroAtivo.current_clicks + " cliques (limite: " + numeroAtivo.click_limit + ")")
+            # Rotacionar para próximo
+            вернуть rotacionarProximoNumero()
+        }
+        
+        вернуть ложь
+    } перехватить (erro) {
+        печать("Erro ao verificar rotação: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para registrar clique no WhatsApp
+функция registrarClique(numberId) {
+    попытаться {
+        если (db == нуль) {
+            вернуть ложь
+        }
+        
+        # Obter número ativo atual ANTES de incrementar
+        пусть numeroAtivo = obterNumeroAtivo()
+        если (numeroAtivo == нуль || numeroAtivo.id != numberId) {
+            # Se o número não está ativo, não incrementa current_clicks
+            # Apenas registra o clique histórico
+            db.execute("INSERT INTO whatsapp_clicks (number_id, click_date) VALUES (?, ?)", 
+                [numberId, Date.timestamp()])
+            вернуть истина
+        }
+        
+        # Registrar clique na tabela de histórico
+        db.execute("INSERT INTO whatsapp_clicks (number_id, click_date) VALUES (?, ?)", 
+            [numberId, Date.timestamp()])
+        
+        # Incrementar contador APENAS do número ativo
+        db.execute("UPDATE whatsapp_numbers SET current_clicks = current_clicks + 1 WHERE id = ? AND active = 1", 
+            [numberId])
+        
+        # Verificar se precisa rotacionar (DEPOIS do incremento)
+        verificarERotacionar()
+        
+        вернуть истина
+    } перехватить (erro) {
+        печать("Erro ao registrar clique: " + erro)
+        вернуть ложь
+    }
+}
+
+# Função para obter estatísticas de cliques por número
+функция obterEstatisticasCliques() {
+    попытаться {
+        если (db == нуль) {
+            вернуть []
+        }
+        пусть stats = db.query("SELECT 
+            wn.id,
+            wn.name,
+            wn.number,
+            wn.active,
+            wn.rotation_enabled,
+            wn.click_limit,
+            wn.current_clicks,
+            COUNT(wc.id) as total_clicks
+        FROM whatsapp_numbers wn
+        LEFT JOIN whatsapp_clicks wc ON wn.id = wc.number_id
+        GROUP BY wn.id
+        ORDER BY wn.active DESC, total_clicks DESC")
+        вернуть stats
+    } перехватить (erro) {
+        печать("Erro ao obter estatísticas: " + erro)
+        вернуть []
+    }
+}
+
+# Função para extrair cookies do header
+функция extrairCookie(headerCookie, nome) {
+    если (headerCookie == нуль || headerCookie == "") {
+        вернуть нуль
+    }
+    пусть cookies = String.разделить(headerCookie, ";")
+    для (пусть cookie из cookies) {
+        пусть partes = String.разделить(String.нижний(cookie), "=")
+        если (Array.длина(partes) == 2) {
+            пусть key = String.заменить(partes[0], " ", "")
+            пусть value = String.заменить(partes[1], " ", "")
+            если (key == nome) {
+                вернуть value
+            }
+        }
+    }
+    вернуть нуль
+}
+
+# Função para verificar autenticação
+функция verificarAuth(запрос) {
+    пусть cookieHeader = запрос.headers["cookie"]
+    если (cookieHeader == нуль) {
+        cookieHeader = запрос.headers["Cookie"]
+    }
+    пусть token = extrairCookie(cookieHeader, "auth_token")
+    если (token == нуль) {
+        вернуть ложь
+    }
+    если (sessions[token] == нуль) {
+        вернуть ложь
+    }
+    вернуть истина
+}
+
+# Função para criar token de sessão
+функция criarToken() {
+    пусть timestamp = Date.timestamp()
+    пусть random = Crypto.randomBytes(16)
+    вернуть Crypto.sha256(timestamp + random + "trest_admin")
+}
+
+# Função para carregar CSS usando módulo Style do Trest
+функция carregarCSS() {
+    попытаться {
+        # Tentar carregar CSS usando Style.loadFile (funciona em compilação web)
+        # No Node.js, usamos FileSystem para ler o arquivo
+        если (FileSystem.exists("styles.css")) {
+            пусть cssContent = FileSystem.readFile("styles.css")
+            вернуть "<style>\n" + cssContent + "\n</style>"
+        } иначе {
+            # Fallback: CSS inline básico se arquivo não existir
+            печать("⚠️ Arquivo styles.css não encontrado, usando CSS inline")
+            вернуть "<style>* { margin: 0; padding: 0; box-sizing: border-box; }</style>"
+        }
+    } перехватить (erro) {
+        печать("Erro ao carregar CSS: " + erro)
+        вернуть "<style>* { margin: 0; padding: 0; box-sizing: border-box; }</style>"
+    }
+}
+
+# Função para gerar HTML da página de login
+функция obterHTMLLogin() {
+    вернуть "<!DOCTYPE html>\n" +
+"<html lang=\"pt-BR\">\n" +
+"<head>\n" +
+"    <meta charset=\"UTF-8\">\n" +
+"    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
+"    <title>Login - Painel Admin</title>\n" +
+carregarCSS() + "\n" +
+"</head>\n" +
+"<body>\n" +
+"    <div class=\"login-container\">\n" +
+"        <h1>🔐 Login Admin</h1>\n" +
+"        <form class=\"login-form\" id=\"loginForm\">\n" +
+"            <input type=\"text\" id=\"username\" placeholder=\"Usuário\" required autofocus>\n" +
+"            <input type=\"password\" id=\"password\" placeholder=\"Senha\" required>\n" +
+"            <button type=\"submit\">Entrar</button>\n" +
+"            <div id=\"error\" class=\"error\" style=\"display: none;\"></div>\n" +
+"        </form>\n" +
+"        <a href=\"/\" class=\"link-back\">← Voltar ao site</a>\n" +
+"    </div>\n" +
+"    <script>\n" +
+"        document.getElementById('loginForm').addEventListener('submit', function(e) {\n" +
+"            e.preventDefault();\n" +
+"            const username = document.getElementById('username').value;\n" +
+"            const password = document.getElementById('password').value;\n" +
+"\n" +
+"            fetch('/api/login', {\n" +
+"                method: 'POST',\n" +
+"                headers: { 'Content-Type': 'application/json' },\n" +
+"                body: JSON.stringify({ username: username, password: password })\n" +
+"            })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    window.location.href = '/admin';\n" +
+"                } else {\n" +
+"                    const errorDiv = document.getElementById('error');\n" +
+"                    errorDiv.textContent = data.error || 'Credenciais inválidas';\n" +
+"                    errorDiv.style.display = 'block';\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => {\n" +
+"                const errorDiv = document.getElementById('error');\n" +
+"                errorDiv.textContent = 'Erro ao fazer login';\n" +
+"                errorDiv.style.display = 'block';\n" +
+"            });\n" +
+"        });\n" +
+"    </script>\n" +
+"</body>\n" +
+"</html>"
+}
+
+# Função para gerar HTML completo do site
+функция obterHTMLCompleto() {
+    вернуть "<!DOCTYPE html>\n" +
+"<html lang=\"pt-BR\">\n" +
+"<head>\n" +
+"    <meta charset=\"UTF-8\">\n" +
+"    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
+"    <title>Trest Language - Documentação</title>\n" +
+carregarCSS() + "\n" +
+"</head>\n" +
+"<body>\n" +
+"    <!-- Menu Lateral -->\n" +
+"    <aside class=\"sidebar\">\n" +
+"        <div class=\"sidebar-header\">\n" +
+"            <h1>🚀 Trest</h1>\n" +
+"            <p>v2.4.9</p>\n" +
+"        </div>\n" +
+"        <nav>\n" +
+"            <ul class=\"nav-menu\">\n" +
+"                <li><a href=\"#inicio\">Início</a></li>\n" +
+"                <li><a href=\"#sobre\">Sobre</a></li>\n" +
+"                <li><a href=\"#pontos-fortes\">Pontos Fortes</a></li>\n" +
+"                <li><a href=\"#caracteristicas\">Características</a></li>\n" +
+"                <li><a href=\"#exemplos\">Exemplos</a></li>\n" +
+"                <li><a href=\"#biblioteca\">Biblioteca Padrão</a></li>\n" +
+"                <li><a href=\"#links\">Links Úteis</a></li>\n" +
+"                <li><a href=\"#whatsapp\">WhatsApp</a></li>\n" +
+"                <li><a href=\"#comentarios\">Comentários</a></li>\n" +
+"            </ul>\n" +
+"        </nav>\n" +
+"    </aside>\n" +
+"\n" +
+"    <!-- Conteúdo Principal -->\n" +
+"    <main class=\"main-content\">\n" +
+"        <section id=\"inicio\">\n" +
+"            <h1>Trest Language</h1>\n" +
+"            <p class=\"intro\">\n" +
+"                Linguagem de programação moderna e profissional com suporte completo a cirílico.\n" +
+"                Permite programar usando palavras-chave em russo ou latino, mantendo a mesma sintaxe e funcionalidades.\n" +
+"            </p>\n" +
+"            <p>\n" +
+"                Trest compila para Web (JavaScript) e Desktop (.exe), oferecendo uma biblioteca padrão rica\n" +
+"                e um sistema de módulos completo. Zero barreira linguística para falantes de russo.\n" +
+"            </p>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"sobre\">\n" +
+"            <h2>Sobre Trest</h2>\n" +
+"            <p>\n" +
+"                Trest é uma linguagem de programação criada para ser moderna, intuitiva e poderosa.\n" +
+"                Sua principal característica é o suporte nativo ao alfabeto cirílico, permitindo que\n" +
+"                programadores russos escrevam código usando palavras-chave em seu idioma nativo.\n" +
+"            </p>\n" +
+"            <p>\n" +
+"                Desenvolvida com foco em produtividade, Trest oferece uma sintaxe limpa baseada em\n" +
+"                JavaScript/TypeScript, mas com recursos únicos que a tornam especial. O mesmo código\n" +
+"                pode ser compilado para diferentes plataformas sem modificações.\n" +
+"            </p>\n" +
+"            <div class=\"code-block\">\n" +
+"                <code>печать(\"Привет, Мир!\")</code>\n" +
+"            </div>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"pontos-fortes\">\n" +
+"            <h2>Pontos Fortes</h2>\n" +
+"            <div class=\"feature-grid\">\n" +
+"                <div class=\"feature-card\">\n" +
+"                    <h3>🌐 Suporte Total ao Cirílico</h3>\n" +
+"                    <p>Palavras-chave em russo nativas, permitindo programação completamente em cirílico.</p>\n" +
+"                </div>\n" +
+"                <div class=\"feature-card\">\n" +
+"                    <h3>⚡ Compilação Universal</h3>\n" +
+"                    <p>Compila para Web (JavaScript) e Desktop (.exe) a partir do mesmo código fonte.</p>\n" +
+"                </div>\n" +
+"                <div class=\"feature-card\">\n" +
+"                    <h3>📚 Biblioteca Padrão Rica</h3>\n" +
+"                    <p>15+ módulos prontos para usar: HTTP, Crypto, FileSystem, Database e mais.</p>\n" +
+"                </div>\n" +
+"                <div class=\"feature-card\">\n" +
+"                    <h3>🔧 Tipagem Dinâmica</h3>\n" +
+"                    <p>Tipos inferidos automaticamente, tornando o desenvolvimento mais ágil.</p>\n" +
+"                </div>\n" +
+"                <div class=\"feature-card\">\n" +
+"                    <h3>📦 Sistema de Módulos</h3>\n" +
+"                    <p>Import/Export completo para organizar código em múltiplos arquivos.</p>\n" +
+"                </div>\n" +
+"                <div class=\"feature-card\">\n" +
+"                    <h3>🛡️ Tratamento de Erros</h3>\n" +
+"                    <p>Try/Catch/Throw robusto com mensagens claras de erro.</p>\n" +
+"                </div>\n" +
+"            </div>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"caracteristicas\">\n" +
+"            <h2>Características Principais</h2>\n" +
+"            <ul>\n" +
+"                <li><strong>Execução Inline:</strong> Execute código direto na linha de comando com <code>-e</code></li>\n" +
+"                <li><strong>Compilação para Web:</strong> Gera JavaScript otimizado para navegadores e Node.js</li>\n" +
+"                <li><strong>Compilação para Desktop:</strong> Cria executáveis .exe nativos standalone</li>\n" +
+"                <li><strong>Sintaxe Intuitiva:</strong> Baseada em JavaScript/TypeScript, fácil de aprender</li>\n" +
+"                <li><strong>Zero Configuração:</strong> Funciona imediatamente após instalação</li>\n" +
+"                <li><strong>Desenvolvimento Ativo:</strong> Versão 2.4.9 com melhorias constantes</li>\n" +
+"            </ul>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"exemplos\">\n" +
+"            <h2>Exemplos de Código</h2>\n" +
+"\n" +
+"            <h3>Variáveis e Funções</h3>\n" +
+"            <div class=\"code-block\">\n" +
+"                <code>пусть имя = \"Trest\"<br>" +
+"пусть возраст = 25<br><br>" +
+"функция приветствие(имя) {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;вернуть \"Привет, \" + имя<br>" +
+"}<br><br>" +
+"печать(приветствие(\"Мир\"))</code>\n" +
+"            </div>\n" +
+"\n" +
+"            <h3>Condicionais e Loops</h3>\n" +
+"            <div class=\"code-block\">\n" +
+"                <code>если (возраст >= 18) {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;печать(\"Совершеннолетний\")<br>" +
+"} иначе {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;печать(\"Ребенок\")<br>" +
+"}<br><br>" +
+"для (пусть i = 0; i < 10; i = i + 1) {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;печать(i)<br>" +
+"}</code>\n" +
+"            </div>\n" +
+"\n" +
+"            <h3>Servidor HTTP</h3>\n" +
+"            <div class=\"code-block\">\n" +
+"                <code>импорт * как HTTP измодуля \"std/http\"<br><br>" +
+"пусть servidor = HTTP.создатьСервер()<br><br>" +
+"servidor.get(\"/\", функция(запрос, ответ) {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;ответ.send(\"<h1>Olá do Trest!</h1>\")<br>" +
+"})<br><br>" +
+"servidor.listen(3000, функция() {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;печать(\"✅ Servidor iniciado\")<br>" +
+"})</code>\n" +
+"            </div>\n" +
+"\n" +
+"            <h3>Classes e OOP</h3>\n" +
+"            <div class=\"code-block\">\n" +
+"                <code>класс Человек {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;функция конструктор(имя, возраст) {<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;это.имя = имя<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;это.возраст = возраст<br>" +
+"&nbsp;&nbsp;&nbsp;&nbsp;}<br>" +
+"}<br><br>" +
+"пусть иван = новый Человек(\"Иван\", 30)<br>" +
+"печать(иван.имя)</code>\n" +
+"            </div>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"biblioteca\">\n" +
+"            <h2>Biblioteca Padrão (std)</h2>\n" +
+"            <p>Trest inclui uma biblioteca padrão completa com 15 módulos prontos para usar:</p>\n" +
+"            <ul>\n" +
+"                <li><strong>Math:</strong> Funções matemáticas (sqrt, pow, abs, PI, E)</li>\n" +
+"                <li><strong>String:</strong> Manipulação de strings (tamanho, maiúsculas, substituir)</li>\n" +
+"                <li><strong>Array:</strong> Operações com arrays (adicionar, remover, ordenar)</li>\n" +
+"                <li><strong>HTTP:</strong> Cliente e servidor HTTP completo</li>\n" +
+"                <li><strong>Crypto:</strong> Criptografia e segurança (MD5, SHA256, AES)</li>\n" +
+"                <li><strong>FileSystem:</strong> Operações de arquivo e diretório</li>\n" +
+"                <li><strong>JSON:</strong> Parsing e stringificação de JSON</li>\n" +
+"                <li><strong>Date:</strong> Manipulação de datas e timestamps</li>\n" +
+"                <li><strong>Database:</strong> Conexão e modelos de banco de dados</li>\n" +
+"                <li><strong>Async:</strong> Promises, timers e operações assíncronas</li>\n" +
+"                <li><strong>RegEx:</strong> Expressões regulares</li>\n" +
+"                <li><strong>Path:</strong> Manipulação de caminhos de arquivo</li>\n" +
+"                <li><strong>Process:</strong> Variáveis de ambiente e sistema</li>\n" +
+"                <li><strong>IO:</strong> Entrada e saída de dados</li>\n" +
+"                <li><strong>GUI:</strong> Interface gráfica (em desenvolvimento)</li>\n" +
+"            </ul>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"whatsapp\">\n" +
+"            <h2>Fale Conosco</h2>\n" +
+"            <p>Entre em contato conosco pelo WhatsApp:</p>\n" +
+"            <a href=\"#\" id=\"whatsappBtn\" class=\"whatsapp-button\" target=\"_blank\" onclick=\"handleWhatsAppClick(event)\">\n" +
+"                <span class=\"whatsapp-icon\">💬</span>\n" +
+"                <span>Conversar no WhatsApp</span>\n" +
+"            </a>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"comentarios\">\n" +
+"            <h2>Comentários</h2>\n" +
+"            <div class=\"comment-form\">\n" +
+"                <h3>Deixe seu comentário</h3>\n" +
+"                <form id=\"commentForm\">\n" +
+"                    <input type=\"text\" id=\"commentName\" placeholder=\"Seu nome\" required>\n" +
+"                    <textarea id=\"commentText\" placeholder=\"Seu comentário\" rows=\"4\" required></textarea>\n" +
+"                    <button type=\"submit\">Enviar Comentário</button>\n" +
+"                </form>\n" +
+"            </div>\n" +
+"            <div id=\"commentsList\" class=\"comments-list\">\n" +
+"                <p style=\"color: var(--text-secondary);\">Carregando comentários...</p>\n" +
+"            </div>\n" +
+"        </section>\n" +
+"\n" +
+"        <section id=\"links\">\n" +
+"            <h2>Links Úteis</h2>\n" +
+"            <div class=\"links-grid\">\n" +
+"                <a href=\"https://trest-site.vercel.app/\" target=\"_blank\" class=\"link-card\">\n" +
+"                    <h4>🌐 Site Oficial</h4>\n" +
+"                    <p>Documentação completa e exemplos no site oficial do Trest</p>\n" +
+"                </a>\n" +
+"                <a href=\"https://www.npmjs.com/package/treste\" target=\"_blank\" class=\"link-card\">\n" +
+"                    <h4>📦 NPM Package</h4>\n" +
+"                    <p>Pacote oficial no NPM para instalação e uso</p>\n" +
+"                </a>\n" +
+"                <a href=\"https://socket.dev/npm/package/treste\" target=\"_blank\" class=\"link-card\">\n" +
+"                    <h4>🔒 Socket Security</h4>\n" +
+"                    <p>Análise de segurança do pacote Trest no Socket</p>\n" +
+"                </a>\n" +
+"            </div>\n" +
+"            <p style=\"margin-top: 2rem; color: var(--text-secondary); font-size: 0.875rem;\">\n" +
+"                Versão 2.4.9 • Licença MIT • Desenvolvido por PoktWeb\n" +
+"            </p>\n" +
+"        </section>\n" +
+"    </main>\n" +
+"    <script>\n" +
+"        // Carregar comentários ao carregar página\n" +
+"        function carregarComentarios() {\n" +
+"            fetch('/api/comments')\n" +
+"                .then(res => res.json())\n" +
+"                .then(data => {\n" +
+"                    const listDiv = document.getElementById('commentsList');\n" +
+"                    if (data.length === 0) {\n" +
+"                        listDiv.innerHTML = '<p style=\"color: var(--text-secondary);\">Nenhum comentário ainda. Seja o primeiro!</p>';\n" +
+"                        return;\n" +
+"                    }\n" +
+"                    listDiv.innerHTML = data.map(comment => `\n" +
+"                        <div class=\"comment-item\">\n" +
+"                            <div class=\"comment-header\">\n" +
+"                                <span class=\"comment-author\">${escapeHtml(comment.name)}</span>\n" +
+"                                <span class=\"comment-date\">${new Date(comment.date).toLocaleString('pt-BR')}</span>\n" +
+"                            </div>\n" +
+"                            <div class=\"comment-text\">${escapeHtml(comment.text)}</div>\n" +
+"                        </div>\n" +
+"                    `).join('');\n" +
+"                })\n" +
+"                .catch(err => {\n" +
+"                    console.error('Erro ao carregar comentários:', err);\n" +
+"                    document.getElementById('commentsList').innerHTML = '<p style=\"color: var(--text-secondary);\">Erro ao carregar comentários.</p>';\n" +
+"                });\n" +
+"        }\n" +
+"\n" +
+"        function escapeHtml(text) {\n" +
+"            const div = document.createElement('div');\n" +
+"            div.textContent = text;\n" +
+"            return div.innerHTML;\n" +
+"        }\n" +
+"\n" +
+"        // Enviar comentário\n" +
+"        document.getElementById('commentForm').addEventListener('submit', function(e) {\n" +
+"            e.preventDefault();\n" +
+"            const name = document.getElementById('commentName').value;\n" +
+"            const text = document.getElementById('commentText').value;\n" +
+"\n" +
+"            fetch('/api/comments', {\n" +
+"                method: 'POST',\n" +
+"                headers: { 'Content-Type': 'application/json' },\n" +
+"                body: JSON.stringify({ name: name, text: text })\n" +
+"            })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    document.getElementById('commentForm').reset();\n" +
+"                    carregarComentarios();\n" +
+"                } else {\n" +
+"                    alert('Erro ao enviar comentário: ' + (data.error || 'Erro desconhecido'));\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => {\n" +
+"                console.error('Erro:', err);\n" +
+"                alert('Erro ao enviar comentário');\n" +
+"            });\n" +
+"        });\n" +
+"\n" +
+"        // Carregar comentários ao carregar página\n" +
+"        carregarComentarios();\n" +
+"\n" +
+"        // Carregar número ativo do WhatsApp (com cache-busting)\n" +
+"        function carregarWhatsApp() {\n" +
+"            // Adicionar timestamp para evitar cache do navegador\n" +
+"            const timestamp = new Date().getTime();\n" +
+"            fetch('/api/whatsapp/active?t=' + timestamp, {\n" +
+"                method: 'GET',\n" +
+"                cache: 'no-cache',\n" +
+"                headers: {\n" +
+"                    'Cache-Control': 'no-cache, no-store, must-revalidate',\n" +
+"                    'Pragma': 'no-cache'\n" +
+"                }\n" +
+"            })\n" +
+"                .then(res => res.json())\n" +
+"                .then(data => {\n" +
+"                    const btn = document.getElementById('whatsappBtn');\n" +
+"                    if (data.number) {\n" +
+"                        // Remover caracteres não numéricos e criar URL do WhatsApp\n" +
+"                        const numeroLimpo = data.number.replace(/[^0-9]/g, '');\n" +
+"                        const mensagem = encodeURIComponent('Olá! Gostaria de saber mais sobre o Trest.');\n" +
+"                        const whatsappUrl = 'https://wa.me/' + numeroLimpo + '?text=' + mensagem;\n" +
+"                        btn.href = whatsappUrl;\n" +
+"                        btn.target = '_blank';\n" +
+"                        btn.style.display = 'inline-flex';\n" +
+"                    } else {\n" +
+"                        btn.style.display = 'none';\n" +
+"                    }\n" +
+"                })\n" +
+"                .catch(err => {\n" +
+"                    console.error('Erro ao carregar WhatsApp:', err);\n" +
+"                    document.getElementById('whatsappBtn').style.display = 'none';\n" +
+"                });\n" +
+"        }\n" +
+"\n" +
+"        // Recarregar número do WhatsApp a cada 30 segundos para pegar atualizações\n" +
+"        setInterval(carregarWhatsApp, 30000);\n" +
+"\n" +
+"        // Registrar clique no WhatsApp\n" +
+"        function handleWhatsAppClick(event) {\n" +
+"            // Registrar clique sem bloquear o redirecionamento\n" +
+"            fetch('/api/whatsapp/click', { method: 'POST' })\n" +
+"                .catch(err => console.error('Erro ao registrar clique:', err));\n" +
+"            // Permitir que o link funcione normalmente (não usar preventDefault)\n" +
+"        }\n" +
+"\n" +
+"        carregarWhatsApp();\n" +
+"    </script>\n" +
+"</body>\n" +
+"</html>"
+}
+
+# Criar servidor HTTP
+пусть servidor = HTTP.создатьСервер()
+
+# Rota principal
+servidor.get("/", функция(запрос, ответ) {
+    ответ.status(200)
+    ответ.header("Content-Type", "text/html; charset=utf-8")
+    ответ.send(obterHTMLCompleto())
+})
+
+# Rota de status (API JSON)
+servidor.get("/api/status", функция(запрос, ответ) {
+    пусть status = {
+        servidor = "Trest",
+        versao = "2.4.9",
+        online = истина,
+        linguagem = "Trest Language"
+    }
+    ответ.json(status)
+})
+
+# Rota de login (página)
+servidor.get("/login", функция(запрос, ответ) {
+    ответ.status(200)
+    ответ.header("Content-Type", "text/html; charset=utf-8")
+    ответ.send(obterHTMLLogin())
+})
+
+# API de login
+servidor.post("/api/login", функция(запрос, ответ) {
+    попытаться {
+        пусть body = запрос.body
+        печать("Login attempt - body: " + body)
+        пусть username = body.username
+        пусть password = body.password
+        печать("Login attempt - username: " + username + ", password: " + password)
+        
+        # Verificar credenciais no banco de dados
+        печать("Verificando credenciais para: " + username)
+        пусть userEncontrado = verificarUsuario(username, password)
+        
+        если (userEncontrado) {
+            пусть token = criarToken()
+            sessions[token] = { username = username, timestamp = Date.timestamp() }
+            ответ.header("Set-Cookie", "auth_token=" + token + "; Path=/; HttpOnly; Max-Age=3600")
+            ответ.json({ success = истина, token = token })
+        } иначе {
+            ответ.status(401)
+            ответ.json({ success = ложь, error = "Credenciais inválidas" })
+        }
+    } перехватить (erro) {
+        печать("Erro no login: " + erro)
+        ответ.status(500)
+        ответ.json({ success = ложь, error = "Erro ao processar login: " + erro })
+    }
+})
+
+# API para obter comentários
+servidor.get("/api/comments", функция(запрос, ответ) {
+    попытаться {
+        пусть comments = obterComentarios()
+        ответ.json(comments)
+    } перехватить (erro) {
+        ответ.status(500)
+        ответ.json({ error = "Erro ao carregar comentários" })
+    }
+})
+
+# API para adicionar comentário
+servidor.post("/api/comments", функция(запрос, ответ) {
+    попытаться {
+        пусть body = запрос.body
+        
+        пусть novoComment = {
+            id = Date.timestamp() + "-" + Crypto.randomBytes(8),
+            name = body.name,
+            text = body.text,
+            date = Date.timestamp()
+        }
+        
+        пусть sucesso = adicionarComentario(novoComment.id, novoComment.name, novoComment.text, novoComment.date)
+        
+        если (sucesso) {
+            ответ.json({ success = истина, comment = novoComment })
+        } иначе {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao adicionar comentário" })
+        }
+    } перехватить (erro) {
+        ответ.status(500)
+        ответ.json({ success = ложь, error = "Erro ao adicionar comentário: " + erro })
+    }
+})
+
+# Rota do painel admin (protegida)
+servidor.get("/admin", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(302)
+        ответ.header("Location", "/login")
+        ответ.send("")
+    } иначе {
+        попытаться {
+        пусть comments = obterComentarios()
+        пусть whatsappStats = obterEstatisticasCliques()
+        пусть html = "<!DOCTYPE html>\n" +
+"<html lang=\"pt-BR\">\n" +
+"<head>\n" +
+"    <meta charset=\"UTF-8\">\n" +
+"    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
+"    <title>Painel Admin</title>\n" +
+carregarCSS() + "\n" +
+"</head>\n" +
+"<body>\n" +
+"    <div class=\"container\">\n" +
+"        <div class=\"header\">\n" +
+"            <h1>🔐 Painel Admin</h1>\n" +
+"            <div>\n" +
+"                <a href=\"/\" class=\"btn\">← Voltar ao site</a>\n" +
+"                <button class=\"btn btn-danger\" onclick=\"logout()\" style=\"margin-left: 0.5rem;\">Sair</button>\n" +
+"            </div>\n" +
+"        </div>\n" +
+"        <div class=\"tabs\">\n" +
+"            <button class=\"tab active\" onclick=\"switchTab('comments')\">💬 Comentários</button>\n" +
+"            <button class=\"tab\" onclick=\"switchTab('whatsapp')\">📱 WhatsApp</button>\n" +
+"        </div>\n" +
+"        <div id=\"commentsTab\" class=\"tab-content active\">\n" +
+"            <div id=\"commentsList\">Carregando comentários...</div>\n" +
+"        </div>\n" +
+"        <div id=\"whatsappTab\" class=\"tab-content\">\n" +
+"            <div class=\"whatsapp-form\" style=\"background: #1a1a2e; border-color: #6366f1;\">\n" +
+"                <h3 style=\"margin-bottom: 1rem; color: #6366f1;\">🔄 Rotação Automática</h3>\n" +
+"                <div style=\"display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;\">\n" +
+"                    <label style=\"display: flex; align-items: center; gap: 0.5rem; cursor: pointer;\">\n" +
+"                        <input type=\"checkbox\" id=\"rotationEnabled\" style=\"width: 20px; height: 20px; cursor: pointer;\">\n" +
+"                        <span>Ativar rotação automática</span>\n" +
+"                    </label>\n" +
+"                </div>\n" +
+"                <div style=\"display: flex; gap: 1rem; align-items: center;\">\n" +
+"                    <label style=\"flex: 1;\">\n" +
+"                        <span style=\"display: block; margin-bottom: 0.5rem; color: #a0a0a0;\">Limite de cliques por número:</span>\n" +
+"                        <input type=\"number\" id=\"clickLimit\" min=\"0\" value=\"0\" style=\"width: 100%; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 0.75rem; color: #e0e0e0; font-family: inherit;\">\n" +
+"                    </label>\n" +
+"                    <button class=\"btn\" onclick=\"saveRotationConfig()\" style=\"margin-top: 1.5rem;\">Salvar Configuração</button>\n" +
+"                </div>\n" +
+"                <div style=\"margin-top: 1rem; padding: 1rem; background: #0a0a0a; border-radius: 6px; font-size: 0.875rem; color: #a0a0a0;\">\n" +
+"                    <strong>Como funciona:</strong> Quando a rotação está ativa, cada número pode receber até X cliques. Ao atingir o limite, o sistema automaticamente passa para o próximo número e zera a contagem do anterior.\n" +
+"                </div>\n" +
+"            </div>\n" +
+"            <div class=\"whatsapp-form\">\n" +
+"                <h3 style=\"margin-bottom: 1rem;\">➕ Adicionar Novo Número</h3>\n" +
+"                <form id=\"whatsappForm\">\n" +
+"                    <input type=\"text\" id=\"whatsappName\" placeholder=\"Nome (ex: Suporte, Vendas)\" required>\n" +
+"                    <input type=\"text\" id=\"whatsappNumber\" placeholder=\"Número (ex: 5511999999999)\" required>\n" +
+"                    <button type=\"submit\" class=\"btn\">Adicionar Número</button>\n" +
+"                </form>\n" +
+"            </div>\n" +
+"            <div id=\"whatsappList\">Carregando números...</div>\n" +
+"        </div>\n" +
+"    </div>\n" +
+"    <script>\n" +
+"        let comments = " + JSON.stringify(comments) + ";\n" +
+"        let whatsappNumbers = " + JSON.stringify(whatsappStats) + ";\n" +
+"\n" +
+"        function switchTab(tabName) {\n" +
+"            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));\n" +
+"            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));\n" +
+"            event.target.classList.add('active');\n" +
+"            document.getElementById(tabName + 'Tab').classList.add('active');\n" +
+"            if (tabName === 'whatsapp') {\n" +
+"                loadRotationConfig();\n" +
+"                renderWhatsApp();\n" +
+"            }\n" +
+"        }\n" +
+"\n" +
+"        function renderWhatsApp() {\n" +
+"            const div = document.getElementById('whatsappList');\n" +
+"            if (whatsappNumbers.length === 0) {\n" +
+"                div.innerHTML = '<div class=\"empty\">Nenhum número cadastrado ainda.</div>';\n" +
+"                return;\n" +
+"            }\n" +
+"            div.innerHTML = whatsappNumbers.map(num => `\n" +
+"                <div class=\"whatsapp-item ${num.active ? 'active' : ''}\">\n" +
+"                    <div class=\"whatsapp-header\">\n" +
+"                        <div>\n" +
+"                            <div class=\"whatsapp-name\">${escapeHtml(num.name)} <span class=\"status-badge ${num.active ? 'status-active' : 'status-inactive'}\">${num.active ? 'ATIVO' : 'INATIVO'}</span></div>\n" +
+"                            <div class=\"whatsapp-number\">${escapeHtml(num.number)}</div>\n" +
+"                        </div>\n" +
+"                        <div class=\"whatsapp-stats\">\n" +
+"                            <div class=\"stat-item\">\n" +
+"                                <span class=\"stat-label\">Total de Cliques</span>\n" +
+"                                <span class=\"stat-value\">${num.total_clicks || 0}</span>\n" +
+"                            </div>\n" +
+"                            ${num.active && num.click_limit > 0 ? `\n" +
+"                            <div class=\"stat-item\">\n" +
+"                                <span class=\"stat-label\">Cliques Atuais / Limite</span>\n" +
+"                                <span class=\"stat-value\" style=\"color: ${(num.current_clicks || 0) >= num.click_limit ? '#ef4444' : '#6366f1'}\">${num.current_clicks || 0} / ${num.click_limit}</span>\n" +
+"                            </div>\n" +
+"                            ` : ''}\n" +
+"                        </div>\n" +
+"                    </div>\n" +
+"                    <div class=\"comment-actions\">\n" +
+"                        ${!num.active ? `<button class=\"btn\" onclick=\"activateNumber(${num.id})\">Ativar</button>` : ''}\n" +
+"                        <button class=\"btn\" onclick=\"editWhatsApp(${num.id})\">Editar</button>\n" +
+"                        <button class=\"btn btn-danger\" onclick=\"deleteWhatsApp(${num.id})\">Deletar</button>\n" +
+"                    </div>\n" +
+"                    <div class=\"edit-form\" id=\"edit-${num.id}\">\n" +
+"                        <input type=\"text\" id=\"edit-name-${num.id}\" value=\"${escapeHtml(num.name)}\" placeholder=\"Nome\">\n" +
+"                        <input type=\"text\" id=\"edit-number-${num.id}\" value=\"${escapeHtml(num.number)}\" placeholder=\"Número\">\n" +
+"                        <button class=\"btn\" onclick=\"saveEdit(${num.id})\">Salvar</button>\n" +
+"                        <button class=\"btn\" onclick=\"cancelEdit(${num.id})\">Cancelar</button>\n" +
+"                    </div>\n" +
+"                </div>\n" +
+"            `).join('');\n" +
+"        }\n" +
+"\n" +
+"        document.getElementById('whatsappForm').addEventListener('submit', function(e) {\n" +
+"            e.preventDefault();\n" +
+"            const name = document.getElementById('whatsappName').value;\n" +
+"            const number = document.getElementById('whatsappNumber').value;\n" +
+"            fetch('/api/admin/whatsapp', {\n" +
+"                method: 'POST',\n" +
+"                headers: { 'Content-Type': 'application/json' },\n" +
+"                body: JSON.stringify({ name, number })\n" +
+"            })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    document.getElementById('whatsappForm').reset();\n" +
+"                    loadWhatsApp();\n" +
+"                } else {\n" +
+"                    alert('Erro: ' + (data.error || 'Erro desconhecido'));\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => alert('Erro ao adicionar número'));\n" +
+"        });\n" +
+"\n" +
+"        function activateNumber(id) {\n" +
+"            fetch('/api/admin/whatsapp/' + id + '/activate', { method: 'POST' })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) loadWhatsApp();\n" +
+"                else alert('Erro: ' + (data.error || 'Erro desconhecido'));\n" +
+"            })\n" +
+"            .catch(err => alert('Erro ao ativar número'));\n" +
+"        }\n" +
+"\n" +
+"        function editWhatsApp(id) {\n" +
+"            document.getElementById('edit-' + id).style.display = 'block';\n" +
+"        }\n" +
+"\n" +
+"        function cancelEdit(id) {\n" +
+"            document.getElementById('edit-' + id).style.display = 'none';\n" +
+"        }\n" +
+"\n" +
+"        function saveEdit(id) {\n" +
+"            const name = document.getElementById('edit-name-' + id).value;\n" +
+"            const number = document.getElementById('edit-number-' + id).value;\n" +
+"            fetch('/api/admin/whatsapp/' + id, {\n" +
+"                method: 'PUT',\n" +
+"                headers: { 'Content-Type': 'application/json' },\n" +
+"                body: JSON.stringify({ name, number })\n" +
+"            })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    document.getElementById('edit-' + id).style.display = 'none';\n" +
+"                    loadWhatsApp();\n" +
+"                } else {\n" +
+"                    alert('Erro: ' + (data.error || 'Erro desconhecido'));\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => alert('Erro ao editar número'));\n" +
+"        }\n" +
+"\n" +
+"        function deleteWhatsApp(id) {\n" +
+"            if (!confirm('Tem certeza que deseja deletar este número?')) return;\n" +
+"            fetch('/api/admin/whatsapp/' + id, { method: 'DELETE' })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) loadWhatsApp();\n" +
+"                else alert('Erro: ' + (data.error || 'Erro desconhecido'));\n" +
+"            })\n" +
+"            .catch(err => alert('Erro ao deletar número'));\n" +
+"        }\n" +
+"\n" +
+"        function loadRotationConfig() {\n" +
+"            fetch('/api/admin/whatsapp/rotation')\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    document.getElementById('rotationEnabled').checked = data.enabled;\n" +
+"                    document.getElementById('clickLimit').value = data.limit || 0;\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => console.error('Erro ao carregar configuração de rotação:', err));\n" +
+"        }\n" +
+"\n" +
+"        function saveRotationConfig() {\n" +
+"            const enabled = document.getElementById('rotationEnabled').checked;\n" +
+"            const limit = parseInt(document.getElementById('clickLimit').value) || 0;\n" +
+"            fetch('/api/admin/whatsapp/rotation', {\n" +
+"                method: 'POST',\n" +
+"                headers: { 'Content-Type': 'application/json' },\n" +
+"                body: JSON.stringify({ enabled, limit })\n" +
+"            })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    alert('✅ Configuração de rotação salva com sucesso!');\n" +
+"                    loadWhatsApp();\n" +
+"                } else {\n" +
+"                    alert('❌ Erro: ' + (data.error || 'Erro desconhecido'));\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => alert('Erro ao salvar configuração'));\n" +
+"        }\n" +
+"\n" +
+"        function loadWhatsApp() {\n" +
+"            fetch('/api/admin/whatsapp')\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    whatsappNumbers = data.numbers;\n" +
+"                    renderWhatsApp();\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => console.error('Erro ao carregar números:', err));\n" +
+"        }\n" +
+"\n" +
+"        function renderComments() {\n" +
+"            const div = document.getElementById('commentsList');\n" +
+"            if (comments.length === 0) {\n" +
+"                div.innerHTML = '<div class=\"empty\">Nenhum comentário ainda.</div>';\n" +
+"                return;\n" +
+"            }\n" +
+"            div.innerHTML = comments.map((comment, index) => `\n" +
+"                <div class=\"comment-item\" id=\"comment-${comment.id}\">\n" +
+"                    <div class=\"comment-header\">\n" +
+"                        <span class=\"comment-author\">${escapeHtml(comment.name)}</span>\n" +
+"                        <span class=\"comment-date\">${new Date(comment.date).toLocaleString('pt-BR')}</span>\n" +
+"                    </div>\n" +
+"                    <div class=\"comment-text\" id=\"text-${comment.id}\">${escapeHtml(comment.text)}</div>\n" +
+"                    <div class=\"edit-form\" id=\"edit-${comment.id}\">\n" +
+"                        <textarea id=\"textarea-${comment.id}\">${escapeHtml(comment.text)}</textarea>\n" +
+"                        <button class=\"btn\" onclick=\"saveEdit('${comment.id}')\">Salvar</button>\n" +
+"                        <button class=\"btn\" onclick=\"cancelEdit('${comment.id}')\">Cancelar</button>\n" +
+"                    </div>\n" +
+"                    <div class=\"comment-actions\">\n" +
+"                        <button class=\"btn\" onclick=\"editComment('${comment.id}')\">Editar</button>\n" +
+"                        <button class=\"btn btn-danger\" onclick=\"deleteComment('${comment.id}')\">Deletar</button>\n" +
+"                    </div>\n" +
+"                </div>\n" +
+"            `).join('');\n" +
+"        }\n" +
+"        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }\n" +
+"        function editComment(id) {\n" +
+"            document.getElementById('text-' + id).style.display = 'none';\n" +
+"            document.getElementById('edit-' + id).style.display = 'block';\n" +
+"        }\n" +
+"        function cancelEdit(id) {\n" +
+"            document.getElementById('text-' + id).style.display = 'block';\n" +
+"            document.getElementById('edit-' + id).style.display = 'none';\n" +
+"        }\n" +
+"        function saveEdit(id) {\n" +
+"            const text = document.getElementById('textarea-' + id).value;\n" +
+"            fetch('/api/admin/comments/' + id, {\n" +
+"                method: 'POST',\n" +
+"                headers: { 'Content-Type': 'application/json' },\n" +
+"                body: JSON.stringify({ text: text })\n" +
+"            })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    const comment = comments.find(c => c.id === id);\n" +
+"                    if (comment) comment.text = text;\n" +
+"                    renderComments();\n" +
+"                } else {\n" +
+"                    alert('Erro ao editar: ' + (data.error || 'Erro desconhecido'));\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => { alert('Erro ao editar comentário'); });\n" +
+"        }\n" +
+"        function deleteComment(id) {\n" +
+"            if (!confirm('Tem certeza que deseja deletar este comentário?')) return;\n" +
+"            fetch('/api/admin/comments/' + id, { method: 'DELETE' })\n" +
+"            .then(res => res.json())\n" +
+"            .then(data => {\n" +
+"                if (data.success) {\n" +
+"                    comments = comments.filter(c => c.id !== id);\n" +
+"                    renderComments();\n" +
+"                } else {\n" +
+"                    alert('Erro ao deletar: ' + (data.error || 'Erro desconhecido'));\n" +
+"                }\n" +
+"            })\n" +
+"            .catch(err => { alert('Erro ao deletar comentário'); });\n" +
+"        }\n" +
+"        function logout() {\n" +
+"            fetch('/api/logout', { method: 'POST' })\n" +
+"            .then(() => { window.location.href = '/login'; });\n" +
+"        }\n" +
+"        renderComments();\n" +
+"    </script>\n" +
+"</body>\n" +
+"</html>"
+        ответ.status(200)
+        ответ.header("Content-Type", "text/html; charset=utf-8")
+        ответ.send(html)
+    } перехватить (erro) {
+        ответ.status(500)
+        ответ.send("Erro ao carregar painel admin")
+        }
+    }
+})
+
+# API para editar comentário (admin)
+servidor.post("/api/admin/comments/:id", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+        # Extrair ID dos parâmetros da rota
+        пусть id = запрос.params.id
+        если (id == нуль) {
+            # Fallback: extrair da URL se params não estiver disponível
+            пусть commentId = запрос.pathname
+            пусть partes = String.разделить(commentId, "/")
+            id = partes[Array.длина(partes) - 1]
+        }
+        
+        пусть body = запрос.body
+        
+        пусть sucesso = atualizarComentario(id, body.text)
+        
+        если (sucesso) {
+            ответ.json({ success = истина })
+        } иначе {
+            ответ.status(404)
+            ответ.json({ success = ложь, error = "Comentário não encontrado" })
+        }
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao editar comentário" })
+        }
+    }
+})
+
+# API para deletar comentário (admin)
+servidor.delete("/api/admin/comments/:id", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            # Extrair ID dos parâmetros da rota
+            пусть id = запрос.params.id
+            если (id == нуль) {
+                # Fallback: extrair da URL se params não estiver disponível
+                пусть commentId = запрос.pathname
+                пусть partes = String.разделить(commentId, "/")
+                id = partes[Array.длина(partes) - 1]
+            }
+            
+            пусть sucesso = deletarComentario(id)
+            
+            если (sucesso) {
+                ответ.json({ success = истина })
+            } иначе {
+                ответ.status(404)
+                ответ.json({ success = ложь, error = "Comentário não encontrado" })
+            }
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao deletar comentário" })
+        }
+    }
+})
+
+# ========== ROTAS API WHATSAPP ==========
+
+# API para obter número ativo do WhatsApp
+servidor.get("/api/whatsapp/active", функция(запрос, ответ) {
+    попытаться {
+        # Sempre buscar do banco de dados (sem cache)
+        пусть numeroAtivo = obterNumeroAtivo()
+        если (numeroAtivo != нуль) {
+            # Adicionar headers para evitar cache
+            ответ.header("Cache-Control", "no-cache, no-store, must-revalidate")
+            ответ.header("Pragma", "no-cache")
+            ответ.header("Expires", "0")
+            ответ.json({ number = numeroAtivo.number, name = numeroAtivo.name })
+        } иначе {
+            ответ.header("Cache-Control", "no-cache, no-store, must-revalidate")
+            ответ.header("Pragma", "no-cache")
+            ответ.json({ number = нуль, name = нуль })
+        }
+    } перехватить (erro) {
+        ответ.status(500)
+        ответ.json({ error = "Erro ao obter número ativo" })
+    }
+})
+
+# API para registrar clique no WhatsApp
+servidor.post("/api/whatsapp/click", функция(запрос, ответ) {
+    попытаться {
+        пусть numeroAtivo = obterNumeroAtivo()
+        если (numeroAtivo != нуль) {
+            registrarClique(numeroAtivo.id)
+            ответ.json({ success = истина })
+        } иначе {
+            ответ.json({ success = ложь, error = "Nenhum número ativo" })
+        }
+    } перехватить (erro) {
+        ответ.status(500)
+        ответ.json({ success = ложь, error = "Erro ao registrar clique" })
+    }
+})
+
+# ========== ROTAS API ADMIN WHATSAPP ==========
+
+# API para obter todos os números (admin)
+servidor.get("/api/admin/whatsapp", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            пусть stats = obterEstatisticasCliques()
+            ответ.json({ success = истина, numbers = stats })
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao obter números" })
+        }
+    }
+})
+
+# API para adicionar número (admin)
+servidor.post("/api/admin/whatsapp", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            пусть body = запрос.body
+            пусть sucesso = adicionarNumero(body.name, body.number)
+            если (sucesso) {
+                ответ.json({ success = истина })
+            } иначе {
+                ответ.status(500)
+                ответ.json({ success = ложь, error = "Erro ao adicionar número" })
+            }
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao adicionar número: " + erro })
+        }
+    }
+})
+
+# API para atualizar número (admin)
+servidor.put("/api/admin/whatsapp/:id", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            пусть id = запрос.params.id
+            если (id == нуль) {
+                пусть partes = String.разделить(запрос.pathname, "/")
+                id = partes[Array.длина(partes) - 1]
+            }
+            пусть body = запрос.body
+            пусть sucesso = atualizarNumero(id, body.name, body.number)
+            если (sucesso) {
+                ответ.json({ success = истина })
+            } иначе {
+                ответ.status(404)
+                ответ.json({ success = ложь, error = "Número não encontrado" })
+            }
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao atualizar número" })
+        }
+    }
+})
+
+# API para ativar número (admin)
+servidor.post("/api/admin/whatsapp/:id/activate", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            пусть id = запрос.params.id
+            если (id == нуль) {
+                пусть partes = String.разделить(запрос.pathname, "/")
+                id = partes[Array.длина(partes) - 1]
+            }
+            пусть sucesso = ativarNumero(id)
+            если (sucesso) {
+                ответ.json({ success = истина })
+            } иначе {
+                ответ.status(404)
+                ответ.json({ success = ложь, error = "Número não encontrado" })
+            }
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao ativar número" })
+        }
+    }
+})
+
+# API para deletar número (admin)
+servidor.delete("/api/admin/whatsapp/:id", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            пусть id = запрос.params.id
+            если (id == нуль) {
+                пусть partes = String.разделить(запрос.pathname, "/")
+                id = partes[Array.длина(partes) - 1]
+            }
+            пусть sucesso = deletarNumero(id)
+            если (sucesso) {
+                ответ.json({ success = истина })
+            } иначе {
+                ответ.status(404)
+                ответ.json({ success = ложь, error = "Número não encontrado" })
+            }
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao deletar número" })
+        }
+    }
+})
+
+# API para obter configuração de rotação
+servidor.get("/api/admin/whatsapp/rotation", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            пусть config = obterConfiguracaoRotacao()
+            ответ.json({ success = истина, enabled = config.enabled, limit = config.limit })
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao obter configuração" })
+        }
+    }
+})
+
+# API para definir configuração de rotação
+servidor.post("/api/admin/whatsapp/rotation", функция(запрос, ответ) {
+    если (!verificarAuth(запрос)) {
+        ответ.status(401)
+        ответ.json({ success = ложь, error = "Não autorizado" })
+    } иначе {
+        попытаться {
+            пусть body = запрос.body
+            пусть ativado = body.enabled == истина
+            пусть limite = body.limit
+            если (limite < 0) {
+                limite = 0
+            }
+            пусть sucesso = definirRotacao(ativado, limite)
+            если (sucesso) {
+                ответ.json({ success = истина })
+            } иначе {
+                ответ.status(500)
+                ответ.json({ success = ложь, error = "Erro ao definir rotação" })
+            }
+        } перехватить (erro) {
+            ответ.status(500)
+            ответ.json({ success = ложь, error = "Erro ao definir rotação: " + erro })
+        }
+    }
+})
+
+# API de logout
+servidor.post("/api/logout", функция(запрос, ответ) {
+    пусть cookieHeader = запрос.headers["cookie"]
+    если (cookieHeader == нуль) {
+        cookieHeader = запрос.headers["Cookie"]
+    }
+    пусть token = extrairCookie(cookieHeader, "auth_token")
+    если (token != нуль) {
+        sessions[token] = нуль
+    }
+    ответ.header("Set-Cookie", "auth_token=; Path=/; HttpOnly; Max-Age=0")
+    ответ.json({ success = истина })
+})
+
+# Iniciar servidor
+servidor.listen(3000, функция() {
+    печать("🚀 Site Trest iniciado com sucesso!")
+    печать("🌐 Acesse: http://localhost:3000")
+    печать("📊 Status API: http://localhost:3000/api/status")
+})
