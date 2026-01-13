@@ -17,32 +17,27 @@
 # Função para inicializar banco de dados
 функция inicializarBanco() {
     попытаться {
-        # Garantir que o diretório data existe
-        если (!FileSystem.exists("data")) {
-            FileSystem.createDir("data")
-        }
+        # Abrir conexão com banco de dados PostgreSQL (Neon)
+        db = DB.открытьБД("postgresql://neondb_owner:npg_pd1HbyWIz2Le@ep-shy-king-ahkd8twj-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
         
-        # Abrir conexão com banco de dados
-        db = DB.открытьБД("data/site.db")
-        
-        # Criar tabelas se não existirem
+        # Criar tabelas se não existirem (sintaxe PostgreSQL)
         db.execute("CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            password TEXT NOT NULL
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(255) NOT NULL UNIQUE,
+            password VARCHAR(255) NOT NULL
         )")
         
         db.execute("CREATE TABLE IF NOT EXISTS comments (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
+            id VARCHAR(255) PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
             text TEXT NOT NULL,
-            date INTEGER NOT NULL
+            date BIGINT NOT NULL
         )")
         
         db.execute("CREATE TABLE IF NOT EXISTS whatsapp_numbers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            number TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            number VARCHAR(255) NOT NULL,
             active INTEGER DEFAULT 0,
             rotation_enabled INTEGER DEFAULT 0,
             click_limit INTEGER DEFAULT 0,
@@ -67,13 +62,24 @@
         }
         
         db.execute("CREATE TABLE IF NOT EXISTS whatsapp_clicks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             number_id INTEGER NOT NULL,
-            click_date INTEGER NOT NULL,
+            click_date BIGINT NOT NULL,
             FOREIGN KEY (number_id) REFERENCES whatsapp_numbers(id)
         )")
         
-        печать("✅ Banco de dados inicializado: data/site.db")
+        # Inserir usuário inicial se não existir
+        попытаться {
+            пусть usuarios = db.query("SELECT * FROM users WHERE username = ?", ["poktweb"])
+            если (Array.длина(usuarios) == 0) {
+                db.execute("INSERT INTO users (username, password) VALUES (?, ?)", ["poktweb", "84005787"])
+                печать("✅ Usuário inicial 'poktweb' criado")
+            }
+        } перехватить (e) {
+            печать("⚠️ Erro ao criar usuário inicial: " + e)
+        }
+        
+        печать("✅ Banco de dados PostgreSQL inicializado")
         вернуть истина
     } перехватить (erro) {
         печать("❌ Erro ao inicializar banco de dados: " + erro)

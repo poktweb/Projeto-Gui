@@ -5,6 +5,12 @@ node_modules/
 *.trest.js
 *.trest.map
 
+# Banco de dados local (não deve ser incluído no deploy)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
 # Logs
 *.log
 npm-debug.log*
@@ -19,6 +25,11 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Lock files (a Vercel instala dependências automaticamente)
+package-lock.json
+bun.lock
+yarn.lock
 
 # Vercel
 .vercel

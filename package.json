@@ -18,7 +18,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "treste": "^2.5.0"
+    "treste": "^2.5.3",
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18.0.0"
